@@ -49,7 +49,7 @@ async function decodeAudioData(
     sampleRate,
   );
 
-  const dataInt16 = new Int16Array(data.buffer);
+  const dataInt16 = new Int16Array(data.buffer, data.byteOffset, data.byteLength / 2);
   const l = dataInt16.length;
   const dataFloat32 = new Float32Array(l);
   for (let i = 0; i < l; i++) {

@@ -10,6 +10,15 @@ import {customElement, state} from 'lit/decorators.js';
 import {createBlob, decode, decodeAudioData} from './utils';
 import './visual-3d';
 
+declare global {
+  interface Window {
+    aistudio?: {
+      hasSelectedApiKey: () => Promise<boolean>;
+      openSelectKey: () => Promise<void>;
+    };
+  }
+}
+
 @customElement('gdm-live-audio')
 export class GdmLiveAudio extends LitElement {
   @state() isRecording = false;
@@ -26,6 +35,8 @@ export class GdmLiveAudio extends LitElement {
   @state() showSettings = false;
   @state() memories: any[] = [];
   @state() networkError = '';
+  @state() hasApiKey = true;
+  @state() customApiKey = localStorage.getItem('GEMINI_API_KEY') || '';
 
   private currentTurnTranscript = '';
   private currentModelTranscript = '';
@@ -208,6 +219,21 @@ export class GdmLiveAudio extends LitElement {
       backdrop-filter: blur(10px);
       box-shadow: 0 10px 30px rgba(0,0,0,0.3);
       animation: slideUp 0.3s ease-out;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .error-toast button {
+      background: white;
+      color: #f87171;
+      border: none;
+      padding: 4px 12px;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 12px;
     }
 
     @keyframes slideUp {
@@ -389,10 +415,6 @@ export class GdmLiveAudio extends LitElement {
     this.initAudio();
     this.initWakeWord();
 
-    this.client = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY,
-    });
-
     this.ambientMasterGain = this.outputAudioContext.createGain();
     this.ambientMasterGain.gain.setValueAtTime(
       this.ambientVolume * 0.05,
@@ -401,6 +423,10 @@ export class GdmLiveAudio extends LitElement {
     this.ambientMasterGain.connect(this.outputAudioContext.destination);
 
     this.outputNode.connect(this.outputAudioContext.destination);
+
+    if (window.aistudio) {
+      this.hasApiKey = await window.aistudio.hasSelectedApiKey();
+    }
 
     this.initSession();
   }
@@ -446,7 +472,8 @@ export class GdmLiveAudio extends LitElement {
     };
   }
 
-  private toggleWakeWord() {
+  private async toggleWakeWord() {
+    await this.resumeAudioContexts();
     if (this.isWakeWordListening) {
       this.recognition?.stop();
       this.isWakeWordListening = false;
@@ -462,7 +489,8 @@ export class GdmLiveAudio extends LitElement {
     }
   }
 
-  private playWakeUpSound() {
+  private async playWakeUpSound() {
+    await this.resumeAudioContexts();
     const ctx = this.outputAudioContext;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
@@ -482,7 +510,8 @@ export class GdmLiveAudio extends LitElement {
     osc.stop(ctx.currentTime + 0.3);
   }
 
-  private playResponseSound() {
+  private async playResponseSound() {
+    await this.resumeAudioContexts();
     const ctx = this.outputAudioContext;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
@@ -502,6 +531,19 @@ export class GdmLiveAudio extends LitElement {
     osc.stop(ctx.currentTime + 0.2);
   }
 
+  private async handleSelectKey() {
+    if (window.aistudio) {
+      try {
+        await window.aistudio.openSelectKey();
+        this.hasApiKey = true;
+        this.updateStatus('API Key updated. Initializing session...');
+        this.initSession();
+      } catch (e) {
+        this.updateError('Failed to select API key: ' + e.message);
+      }
+    }
+  }
+
   private async initSession() {
     if (!navigator.onLine) {
       this.updateStatus('Offline: AI features unavailable. Check your connection.');
@@ -513,6 +555,16 @@ export class GdmLiveAudio extends LitElement {
         this.session.close();
       } catch (e) {}
     }
+
+    const apiKey = this.customApiKey || process.env.API_KEY || process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      this.hasApiKey = false;
+      this.updateStatus('API Key missing. Please set your Gemini API key.');
+      return;
+    }
+
+    this.client = new GoogleGenAI({ apiKey });
+
     const model = 'gemini-2.5-flash-native-audio-preview-09-2025';
 
     const tools: FunctionDeclaration[] = [
@@ -570,128 +622,148 @@ export class GdmLiveAudio extends LitElement {
             this.updateStatus('Opened');
           },
           onmessage: async (message: LiveServerMessage) => {
-            // Handle Transcriptions
-            if (message.serverContent?.inputTranscription?.text) {
-              this.currentTurnTranscript = message.serverContent.inputTranscription.text;
-            }
-            if (message.serverContent?.modelTurn?.parts?.[0]?.text) {
-              this.currentModelTranscript += message.serverContent.modelTurn.parts[0].text;
-            }
+            try {
+              // Handle Transcriptions
+              if (message.serverContent?.inputTranscription?.text) {
+                this.currentTurnTranscript = message.serverContent.inputTranscription.text;
+              }
+              if (message.serverContent?.modelTurn?.parts?.[0]?.text) {
+                this.currentModelTranscript += message.serverContent.modelTurn.parts[0].text;
+              }
 
-            // Handle Tool Calls
-            if (message.toolCall) {
-              const responses = [];
-              for (const call of message.toolCall.functionCalls) {
-                let result: any = {status: 'success'};
+              // Handle Tool Calls
+              if (message.toolCall) {
+                const responses = [];
+                for (const call of message.toolCall.functionCalls) {
+                  let result: any = {status: 'success'};
 
-                if (call.name === 'get_time') {
-                  result = {time: new Date().toLocaleString()};
-                } else if (call.name === 'set_ambient_music') {
-                  const idx = call.args.track_index as number;
-                  if (idx >= 0 && idx <= 2) {
-                    this.ambientTrack = idx;
-                    if (this.isMusicPlaying) {
-                      this.stopAmbientMusic();
-                      setTimeout(() => this.startAmbientMusic(), 100);
+                  if (call.name === 'get_time') {
+                    result = {time: new Date().toLocaleString()};
+                  } else if (call.name === 'set_ambient_music') {
+                    const idx = call.args.track_index as number;
+                    if (idx >= 0 && idx <= 2) {
+                      this.ambientTrack = idx;
+                      if (this.isMusicPlaying) {
+                        this.stopAmbientMusic();
+                        setTimeout(() => this.startAmbientMusic(), 100);
+                      }
+                      result = {status: 'success', track: idx};
+                    } else {
+                      result = {status: 'error', message: 'Invalid track index'};
                     }
-                    result = {status: 'success', track: idx};
-                  } else {
-                    result = {status: 'error', message: 'Invalid track index'};
+                  } else if (call.name === 'set_ambient_volume') {
+                    const vol = call.args.volume as number;
+                    this.ambientVolume = Math.max(0, Math.min(1, vol));
+                    if (this.ambientMasterGain) {
+                      this.ambientMasterGain.gain.setTargetAtTime(
+                        this.ambientVolume * 0.05,
+                        this.outputAudioContext.currentTime,
+                        0.1,
+                      );
+                    }
+                    result = {status: 'success', volume: vol};
+                  } else if (call.name === 'toggle_recording') {
+                    this.stopRecording();
+                    result = {status: 'success'};
                   }
-                } else if (call.name === 'set_ambient_volume') {
-                  const vol = call.args.volume as number;
-                  this.ambientVolume = Math.max(0, Math.min(1, vol));
-                  if (this.ambientMasterGain) {
-                    this.ambientMasterGain.gain.setTargetAtTime(
-                      this.ambientVolume * 0.05,
-                      this.outputAudioContext.currentTime,
-                      0.1,
-                    );
-                  }
-                  result = {status: 'success', volume: vol};
-                } else if (call.name === 'toggle_recording') {
-                  this.stopRecording();
-                  result = {status: 'success'};
+
+                  responses.push({
+                    id: call.id,
+                    name: call.name,
+                    response: result,
+                  });
                 }
 
-                responses.push({
-                  id: call.id,
-                  name: call.name,
-                  response: result,
+                this.session.sendToolResponse({
+                  functionResponses: responses,
                 });
               }
 
-              this.session.sendToolResponse({
-                functionResponses: responses,
-              });
-            }
+              const audio =
+                message.serverContent?.modelTurn?.parts[0]?.inlineData;
 
-            const audio =
-              message.serverContent?.modelTurn?.parts[0]?.inlineData;
+              if (audio) {
+                console.log('Received audio chunk from model', audio.data.length);
+                this.isProcessing = false;
+                if (!this.isModelSpeaking) {
+                  this.isModelSpeaking = true;
+                  this.playResponseSound();
+                }
 
-            if (audio) {
-              this.isProcessing = false;
-              if (!this.isModelSpeaking) {
-                this.isModelSpeaking = true;
-                this.playResponseSound();
+                this.nextStartTime = Math.max(
+                  this.nextStartTime,
+                  this.outputAudioContext.currentTime,
+                );
+
+                const audioBuffer = await decodeAudioData(
+                  decode(audio.data),
+                  this.outputAudioContext,
+                  24000,
+                  1,
+                ).catch(e => {
+                  console.error('Audio decode error:', e);
+                  return null;
+                });
+
+                if (audioBuffer) {
+                  const source = this.outputAudioContext.createBufferSource();
+                  source.buffer = audioBuffer;
+                  source.connect(this.outputNode);
+                  source.addEventListener('ended', () => {
+                    this.sources.delete(source);
+                  });
+
+                  source.start(this.nextStartTime);
+                  this.nextStartTime = this.nextStartTime + audioBuffer.duration;
+                  this.sources.add(source);
+                }
               }
 
-              this.nextStartTime = Math.max(
-                this.nextStartTime,
-                this.outputAudioContext.currentTime,
-              );
+              if (message.serverContent?.turnComplete) {
+                this.isModelSpeaking = false;
+                this.isProcessing = false;
 
-              const audioBuffer = await decodeAudioData(
-                decode(audio.data),
-                this.outputAudioContext,
-                24000,
-                1,
-              );
-              const source = this.outputAudioContext.createBufferSource();
-              source.buffer = audioBuffer;
-              source.connect(this.outputNode);
-              source.addEventListener('ended', () => {
-                this.sources.delete(source);
-              });
-
-              source.start(this.nextStartTime);
-              this.nextStartTime = this.nextStartTime + audioBuffer.duration;
-              this.sources.add(source);
-            }
-
-            if (message.serverContent?.turnComplete) {
-              this.isModelSpeaking = false;
-              this.isProcessing = false;
-
-              if (this.currentTurnTranscript) {
-                this.saveMemory('user', this.currentTurnTranscript);
-                this.currentTurnTranscript = '';
-              }
-              if (this.currentModelTranscript) {
-                this.saveMemory('assistant', this.currentModelTranscript);
-                this.currentModelTranscript = '';
-              }
-            }
-
-            const interrupted = message.serverContent?.interrupted;
-            if (interrupted) {
-              this.isModelSpeaking = false;
-              this.isProcessing = false;
-
-              if (this.currentModelTranscript) {
-                this.saveMemory('assistant', this.currentModelTranscript + ' (interrupted)');
-                this.currentModelTranscript = '';
+                if (this.currentTurnTranscript) {
+                  this.saveMemory('user', this.currentTurnTranscript);
+                  this.currentTurnTranscript = '';
+                }
+                if (this.currentModelTranscript) {
+                  this.saveMemory('assistant', this.currentModelTranscript);
+                  this.currentModelTranscript = '';
+                }
               }
 
-              for (const source of this.sources.values()) {
-                source.stop();
-                this.sources.delete(source);
+              const interrupted = message.serverContent?.interrupted;
+              if (interrupted) {
+                this.isModelSpeaking = false;
+                this.isProcessing = false;
+
+                if (this.currentModelTranscript) {
+                  this.saveMemory('assistant', this.currentModelTranscript + ' (interrupted)');
+                  this.currentModelTranscript = '';
+                }
+
+                for (const source of this.sources.values()) {
+                  try {
+                    source.stop();
+                  } catch (e) {}
+                  this.sources.delete(source);
+                }
+                this.nextStartTime = 0;
               }
-              this.nextStartTime = 0;
+            } catch (e) {
+              console.error('Error processing message:', e);
+              this.updateError('Message processing error: ' + e.message);
             }
           },
           onerror: (e: ErrorEvent) => {
-            this.updateError(e.message);
+            console.error('Live API error:', e);
+            if (e.message?.includes('Requested entity was not found')) {
+              this.hasApiKey = false;
+              this.updateError('API Key invalid or not found. Please re-select.');
+            } else {
+              this.updateError('Live API Error: ' + e.message);
+            }
           },
           onclose: (e: CloseEvent) => {
             this.updateStatus('Close:' + e.reason);
@@ -718,7 +790,7 @@ export class GdmLiveAudio extends LitElement {
           outputAudioTranscription: {},
           tools: [{functionDeclarations: tools}],
           speechConfig: {
-            voiceConfig: {prebuiltVoiceConfig: {voiceName: 'Orus'}},
+            voiceConfig: {prebuiltVoiceConfig: {voiceName: 'Zephyr'}},
             // languageCode: 'en-GB'
           },
         },
@@ -798,11 +870,21 @@ export class GdmLiveAudio extends LitElement {
     this.error = msg;
   }
 
+  private async resumeAudioContexts() {
+    if (this.inputAudioContext.state === 'suspended') {
+      await this.inputAudioContext.resume();
+    }
+    if (this.outputAudioContext.state === 'suspended') {
+      await this.outputAudioContext.resume();
+    }
+  }
+
   private async startRecording() {
     if (this.isRecording) {
       return;
     }
 
+    await this.resumeAudioContexts();
     this.isProcessing = false;
 
     if (this.isWakeWordListening) {
@@ -835,6 +917,7 @@ export class GdmLiveAudio extends LitElement {
 
       this.scriptProcessorNode.onaudioprocess = (audioProcessingEvent) => {
         if (!this.isRecording) return;
+        if (Math.random() < 0.01) console.log('Sending PCM chunk to model');
 
         const inputBuffer = audioProcessingEvent.inputBuffer;
         const pcmData = inputBuffer.getChannelData(0);
@@ -895,7 +978,8 @@ export class GdmLiveAudio extends LitElement {
     this.updateStatus('Session cleared.');
   }
 
-  private toggleMusic() {
+  private async toggleMusic() {
+    await this.resumeAudioContexts();
     if (this.isMusicPlaying) {
       this.stopAmbientMusic();
     } else {
@@ -1002,6 +1086,18 @@ export class GdmLiveAudio extends LitElement {
     }, 1100);
   }
 
+  private handleApiKeyInput(e: Event) {
+    const input = e.target as HTMLInputElement;
+    this.customApiKey = input.value;
+  }
+
+  private saveCustomApiKey() {
+    localStorage.setItem('GEMINI_API_KEY', this.customApiKey);
+    this.hasApiKey = !!this.customApiKey;
+    this.updateStatus('API Key saved locally. Re-initializing...');
+    this.initSession();
+  }
+
   render() {
     return html`
       <div>
@@ -1017,7 +1113,19 @@ export class GdmLiveAudio extends LitElement {
           </button>
         </div>
 
-        ${this.networkError ? html`<div class="error-toast">${this.networkError}</div>` : ''}
+        ${this.networkError ? html`
+          <div class="error-toast">
+            ${this.networkError}
+            <button @click=${() => this.initSession()}>Retry Connection</button>
+          </div>
+        ` : ''}
+
+        ${!this.hasApiKey ? html`
+          <div class="error-toast" style="background: rgba(59, 130, 246, 0.9);">
+            Gemini API Key Required
+            <button @click=${this.handleSelectKey}>Set API Key</button>
+          </div>
+        ` : ''}
 
         ${this.showSettings ? html`
           <div class="settings-modal">
@@ -1027,6 +1135,33 @@ export class GdmLiveAudio extends LitElement {
             </h2>
             
             <div class="music-controls-panel visible" style="position: static; width: 100%; background: none; border: none; padding: 0;">
+              <div class="control-group">
+                <label>API Configuration</label>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                  <input
+                    type="password"
+                    placeholder="Enter Gemini API Key"
+                    .value=${this.customApiKey}
+                    @input=${this.handleApiKeyInput}
+                    style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); padding: 8px; border-radius: 8px; color: white; font-size: 12px;"
+                  />
+                  <button @click=${this.saveCustomApiKey} style="background: white; color: black; border: none; padding: 8px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 12px;">
+                    Save Key
+                  </button>
+                  <div style="text-align: center; font-size: 10px; opacity: 0.5; margin: 4px 0;">OR</div>
+                  <button @click=${this.handleSelectKey} style="background: rgba(255,255,255,0.1); color: white; border: 1px solid rgba(255,255,255,0.2); width: 100%; padding: 8px; border-radius: 8px; cursor: pointer; font-size: 12px;">
+                    Use Platform Dialog
+                  </button>
+                </div>
+              </div>
+              <div class="control-group">
+                <label>Wake Word ('Hey Orb')</label>
+                <button 
+                  @click=${this.toggleWakeWord} 
+                  style="background: ${this.isWakeWordListening ? '#60a5fa' : 'rgba(255,255,255,0.1)'}; color: white; border: 1px solid rgba(255,255,255,0.2); width: 100%; padding: 8px; border-radius: 8px; cursor: pointer; font-size: 12px;">
+                  ${this.isWakeWordListening ? 'Listening Active' : 'Enable Listening'}
+                </button>
+              </div>
               <div class="control-group">
                 <label>Ambient Volume</label>
                 <input
@@ -1166,9 +1301,13 @@ export class GdmLiveAudio extends LitElement {
         </div>
 
         <div id="status">
-          <span style="color: #60a5fa; font-size: 10px; opacity: 0.8;">● Offline Mode (Local Data)</span>
+          <span style="color: #60a5fa; font-size: 10px; opacity: 0.8;">
+            ${navigator.onLine ? '● Online (AI Ready)' : '● Offline Mode (Local Data)'}
+          </span>
           <br />
-          ${this.error}
+          <span style="color: white; font-size: 12px;">${this.status}</span>
+          <br />
+          <span style="color: #f87171; font-size: 12px;">${this.error}</span>
         </div>
         <gdm-live-audio-visuals-3d
           .inputNode=${this.inputNode}

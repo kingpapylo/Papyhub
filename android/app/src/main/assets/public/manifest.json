@@ -1,0 +1,21 @@
+{
+  "name": "Papylo Orb",
+  "short_name": "Orb",
+  "description": "An interactive 3D orb powered by Live Audio API.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#100c14",
+  "theme_color": "#3b82f6",
+  "icons": [
+    {
+      "src": "https://picsum.photos/seed/orb/192/192",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "https://picsum.photos/seed/orb/512/512",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

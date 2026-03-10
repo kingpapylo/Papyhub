@@ -565,7 +565,8 @@ export class GdmLiveAudio extends LitElement {
 
     this.client = new GoogleGenAI({ apiKey });
 
-    const model = 'gemini-2.5-flash-native-audio-preview-09-2025';
+    // Using the newer 12-2025 model which is often more stable for Live API
+    const model = 'gemini-2.5-flash-native-audio-preview-12-2025';
 
     const tools: FunctionDeclaration[] = [
       {
@@ -620,6 +621,7 @@ export class GdmLiveAudio extends LitElement {
         callbacks: {
           onopen: () => {
             this.updateStatus('Opened');
+            this.updateError(''); // Clear any previous errors on success
           },
           onmessage: async (message: LiveServerMessage) => {
             try {
@@ -758,11 +760,14 @@ export class GdmLiveAudio extends LitElement {
           },
           onerror: (e: ErrorEvent) => {
             console.error('Live API error:', e);
-            if (e.message?.includes('Requested entity was not found')) {
+            const errorMsg = e.message || '';
+            if (errorMsg.includes('Requested entity was not found')) {
               this.hasApiKey = false;
               this.updateError('API Key invalid or not found. Please re-select.');
+            } else if (errorMsg.includes('service is currently unavailable')) {
+              this.updateError('Gemini Service Unavailable. This often means the model is not available in your region or your API key lacks permissions for this preview model.');
             } else {
-              this.updateError('Live API Error: ' + e.message);
+              this.updateError('Live API Error: ' + errorMsg);
             }
           },
           onclose: (e: CloseEvent) => {
@@ -1307,7 +1312,10 @@ export class GdmLiveAudio extends LitElement {
           <br />
           <span style="color: white; font-size: 12px;">${this.status}</span>
           <br />
-          <span style="color: #f87171; font-size: 12px;">${this.error}</span>
+          <span style="color: #f87171; font-size: 12px;">
+            ${this.error}
+            ${this.error ? html`<button @click=${() => this.initSession()} style="margin-left: 8px; background: rgba(248, 113, 113, 0.2); border: 1px solid #f87171; color: white; padding: 2px 6px; border-radius: 4px; cursor: pointer; font-size: 10px;">Retry</button>` : ''}
+          </span>
         </div>
         <gdm-live-audio-visuals-3d
           .inputNode=${this.inputNode}
